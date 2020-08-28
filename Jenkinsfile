@@ -1,72 +1,66 @@
-pipeline
-{
-    options
-    {
-        buildDiscarder(logRotator(numToKeepStr: '3'))
+pipeline {
+  agent {
+    node {
+      label 'maven'
     }
-    agent any
-    environment 
-    {
-        VERSION = 'latest'
-        PROJECT = 'tap_sample'
-        IMAGE = 'tap_sample:latest'
-        ECRURL = 'http://849248106259.dkr.ecr.cn-northwest-1.amazonaws.com.cn'
-        ECRCRED = 'ecr:cn-northwest-1:test-ecr'
+  }
+
+    parameters {
+        string(name:'TAG_NAME',defaultValue: '',description:'')
     }
-    stages
-    {
-        stage('Build preparations')
-        {
-            steps
-            {
-                script 
-                {
-                    // calculate GIT lastest commit short-hash
-                    gitCommitHash = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
-                    shortCommitHash = gitCommitHash.take(7)
-                    // calculate a sample version tag
-                    VERSION = shortCommitHash
-                    // set the build display name
-                    currentBuild.displayName = "#${BUILD_ID}-${VERSION}"
-                    IMAGE = "$PROJECT:$VERSION"
+
+    environment {
+        DOCKER_CREDENTIAL_ID = 'dockerhub-id'
+        GITHUB_CREDENTIAL_ID = 'github-id'
+        KUBECONFIG_CREDENTIAL_ID = 'kubeconfig-id'
+        REGISTRY = 'docker.io'
+        DOCKERHUB_NAMESPACE = 'sollonsun'
+        GITHUB_ACCOUNT = 'sollonsun'
+        APP_NAME = 'devops-java-sample'
+        SONAR_CREDENTIAL_ID = 'sonar-token'
+    }
+
+    stages {
+        stage ('checkout scm') {
+            steps {
+                checkout(scm)
+            }
+        }
+
+        stage ('unit test') {
+            steps {
+                container ('maven') {
+                    sh 'mvn clean -o -gs `pwd`/configuration/settings.xml test'
                 }
             }
         }
-        stage('Docker build')
-        {
-            steps
-            {
-                script
-                {
-                    // Build the docker image using a Dockerfile
-                    docker.build("$IMAGE","examples/pipelines/TAP_docker_image_build_push_ecr")
+
+        stage('sonarqube analysis') {
+          steps {
+            container ('maven') {
+              withCredentials([string(credentialsId: "$SONAR_CREDENTIAL_ID", variable: 'SONAR_TOKEN')]) {
+                withSonarQubeEnv('sonar') {
+                 sh "mvn sonar:sonar -o -gs `pwd`/configuration/settings.xml -Dsonar.branch=$BRANCH_NAME -Dsonar.login=$SONAR_TOKEN"
                 }
+              }
+              timeout(time: 1, unit: 'HOURS') {
+                waitForQualityGate abortPipeline: true
+              }
             }
+          }
         }
-        stage('Docker push')
-        {
-            steps
-            {
-                script
-                {
-                    // login to ECR - for now it seems that that the ECR Jenkins plugin is not performing the login as expected. I hope it will in the future.
-                    sh("eval \$(aws ecr get-login --no-include-email | sed 's|https://||')")
-                    // Push the Docker image to ECR
-                    docker.withRegistry(ECRURL, ECRCRED)
-                    {
-                        docker.image(IMAGE).push()
+
+        stage ('build & push') {
+            steps {
+                container ('maven') {
+                    sh 'mvn -o -Dmaven.test.skip=true -gs `pwd`/configuration/settings.xml clean package'
+                    sh 'docker build -f Dockerfile-online -t $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BRANCH_NAME-$BUILD_NUMBER .'
+                    withCredentials([usernamePassword(passwordVariable : 'DOCKER_PASSWORD' ,usernameVariable : 'DOCKER_USERNAME' ,credentialsId : "$DOCKER_CREDENTIAL_ID" ,)]) {
+                        sh 'echo "$DOCKER_PASSWORD" | docker login $REGISTRY -u "$DOCKER_USERNAME" --password-stdin'
+                        sh 'docker push  $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BRANCH_NAME-$BUILD_NUMBER'
                     }
                 }
             }
         }
-    }
-    
-    post
-    {
-        always
-        {
-            // make sure that the Docker image is removed
-            sh "docker rmi $IMAGE | true"
-        }
-    }
-} 
+
+}
