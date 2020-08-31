@@ -1,1 +1,1 @@
-from contos
+FROM centos
