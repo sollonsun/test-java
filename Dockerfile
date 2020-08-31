@@ -1,1 +1,1 @@
-从 contos
+from contos
